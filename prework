@@ -1,0 +1,131 @@
+class ContraSmaDnn():
+    '''Class for backtesting Contrarian Stratgy based on return, sma and dnn signal'''
+    
+    def __init__(self, symbol, lags, SMA_S, SMA_L, dir1, window, start, end,tc,  mu, std):
+        self.symbol = symbol
+        self.lags = lags
+        self.SMA_S = SMA_S
+        self.SMA_L = SMA_L
+        self.dir1 = dir1
+        self.window = window
+        self.start = start
+        self.end = end
+        self.tc = tc
+        self.mu = mu
+        self.std = std
+        self.results = None
+        self.get_data() 
+        
+    def get_data(self):
+        ''' Retrieves and prepares the data.
+        '''
+        raw = pd.read_csv(r"C:\Users\Munir\Documents\Programming\Alexander_Hagmann\OandaProject1\forex_pairs.csv", parse_dates = ["Date"], index_col = "Date")
+        raw = raw[self.symbol].to_frame().dropna()
+        raw = raw.loc[self.start:self.end].copy()
+        raw.rename(columns={self.symbol: "price"}, inplace=True)
+        
+        raw["SMA_S"] = raw["price"].rolling(window = self.SMA_S).mean()
+        raw["SMA_L"] = raw["price"].rolling(window= self.SMA_L).mean()
+        self.data = raw
+        
+        # create features for dnn
+        raw["returns"] = np.log(raw["price"] / raw["price"].shift(1)) #must later signifies up or down with binary signal 1,0
+        raw["dir"] = np.where(raw["returns"] > 0, 1, 0)
+        raw["sma"] = raw["price"].rolling(self.window).mean() - raw["price"].rolling(150).mean()
+        raw["boll"] = (raw["price"] - raw["price"].rolling(self.window).mean()) / raw["price"].rolling(self.window).std()
+        raw["min"] = raw["price"].rolling(self.window).min() / raw["price"] - 1
+        raw["max"] = raw["price"].rolling(self.window).max() / raw["price"] - 1
+        raw["mom"] = raw["returns"].rolling(3).mean()
+        raw["vol"] = raw["returns"].rolling(self.window).std()
+        raw.dropna(inplace = True)
+        
+        # create lags
+        self.cols = []
+        features = ["dir", "sma", "boll", "min", "max", "mom", "vol"]
+
+        for f in features:
+            for lag in range(1, self.lags + 1):
+                col = "{}_lag_{}".format(f, lag)
+                raw[col] = raw[f].shift(lag)
+                self.cols.append(col)
+        raw.dropna(inplace = True)
+        self.data = raw.copy()
+        
+    def predict(self): 
+        
+        seed = 100
+        random.seed(seed)
+        np.random.seed(seed)
+        tf.random.set_seed(seed)
+    
+    #cw
+        c0, c1 = np.bincount(self.data["dir"])
+        w0 = (1/c0) * (len(self.data)) / 2
+        w1 = (1/c1) * (len(self.data)) / 2
+        return {0:w0, 1:w1}
+
+        optimizer = Adam(lr = 0.0001)
+
+        hl = 2
+        hu = 100
+        dropout = False
+        rate = 0.3
+        regularize = False
+        reg = l1(0.0005)
+        optimizer = optimizer
+        input_dim = None
+        
+        if not regularize:
+            reg = None
+        model = Sequential()
+        model.add(Dense(hu, input_dim = input_dim, activity_regularizer = reg ,activation = "relu"))
+        if dropout: 
+            model.add(Dropout(rate, seed = 100))
+        for layer in range(hl):
+            model.add(Dense(hu, activation = "relu", activity_regularizer = reg))
+            if dropout:
+                model.add(Dropout(rate, seed = 100))
+        model.add(Dense(1, activation = "sigmoid"))
+        model.compile(loss = "binary_crossentropy", optimizer = optimizer, metrics = ["accuracy"])
+        return model
+        
+        raw = self.data.copy()
+        raw_s = (raw - self.mu) / self.std
+        raw["proba"] = self.model.predict(raw_s[self.cols])
+        raw = self.data.copy()
+        
+    def set_parameters(self, SMA_S = None, SMA_L = None):
+        ''' Updates SMA parameters and resp. time series.
+        '''
+        if SMA_S is not None:
+            self.SMA_S = SMA_S
+            self.data["SMA_S"] = self.data["price"].rolling(self.SMA_S).mean()
+        if SMA_L is not None:
+            self.SMA_L = SMA_L
+            self.data["SMA_L"] = self.data["price"].rolling(self.SMA_L).mean()
+            
+    def  test_strategy(self):
+        ''' Backtests the trading strategy.
+        '''
+        data = self.data.copy().dropna()    
+        data["position"] =  np.where(data["SMA_S"] > data["SMA_L"], 1, -1)  
+        data["position"] =  np.where(data["returns"].rolling(self.dir1).mean() > 0, -1, 1)
+        data["position"] = np.where(data["proba"] > 0.53 , 1, 0)
+        data["strategy"] = data["position"].shift(1) * data["returns"]
+        
+        data.dropna(inplace=True)
+        
+        # determine when a trade takes place
+        data["trades"] = data.position.diff().fillna(0).abs()
+        
+        # subtract transaction costs from return when trade takes place
+        data.strategy = data.strategy - data.trades * self.tc
+        
+        data["creturns"] = data["returns"].cumsum().apply(np.exp)
+        data["cstrategy"] = data["strategy"].cumsum().apply(np.exp)
+        self.results = data
+        # absolute performance of the strategy
+        perf = data["cstrategy"].iloc[-1]
+        # out-/underperformance of strategy
+        outperf = perf - data["creturns"].iloc[-1]
+        return round(perf, 6), round(outperf, 6)
